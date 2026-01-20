@@ -1,6 +1,9 @@
 name: "Notify Release to Teams"
 description: "Send a Microsoft Teams notification when a new release is published"
 author: "SomoneIT"
+branding:
+  color: "green"
+  icon: "send"
 
 inputs:
   webhook-url:

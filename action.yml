@@ -1,0 +1,109 @@
+name: "Notify Release to Teams"
+description: "Send a Microsoft Teams notification when a new release is published"
+author: "SomoneIT"
+
+inputs:
+  webhook-url:
+    description: "Microsoft Teams webhook URL"
+    required: true
+  version:
+    description: "Version to notify about (defaults to github.ref_name for releases)"
+    required: false
+    default: ""
+  repository:
+    description: "Repository name (defaults to github.repository)"
+    required: false
+    default: ${{ github.repository }}
+  theme-color:
+    description: "Card theme color (hex without #)"
+    required: false
+    default: "0076D7"
+
+outputs:
+  release-url:
+    description: "URL to the release"
+    value: ${{ steps.release_info.outputs.RELEASE_URL }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set version and release info
+      id: release_info
+      shell: bash
+      env:
+        EVENT_NAME: ${{ github.event_name }}
+        INPUT_VERSION: ${{ inputs.version }}
+        REF_NAME: ${{ github.ref_name }}
+        RELEASE_BODY: ${{ github.event.release.body }}
+        REPOSITORY: ${{ inputs.repository }}
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        if [ -n "$INPUT_VERSION" ]; then
+          VERSION="$INPUT_VERSION"
+        elif [ "$EVENT_NAME" = "release" ]; then
+          VERSION="$REF_NAME"
+        else
+          VERSION="$REF_NAME"
+        fi
+
+        # Try to fetch release notes from GitHub API
+        if [ "$EVENT_NAME" = "release" ] && [ -n "$RELEASE_BODY" ]; then
+          RELEASE_NOTES="$RELEASE_BODY"
+        else
+          echo "Fetching release notes for version: $VERSION"
+          RELEASE_NOTES=$(gh release view "$VERSION" --repo "$REPOSITORY" --json body --jq '.body' 2>/dev/null || echo "")
+          if [ -z "$RELEASE_NOTES" ]; then
+            RELEASE_NOTES="No release notes for this version"
+          fi
+        fi
+
+        REPO_NAME="${REPOSITORY#*/}"
+
+        echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+        echo "RELEASE_URL=https://github.com/$REPOSITORY/releases/tag/$VERSION" >> $GITHUB_OUTPUT
+        echo "REPO_NAME=$REPO_NAME" >> $GITHUB_OUTPUT
+
+        {
+          echo "RELEASE_NOTES<<RELEASE_NOTES_EOF"
+          printf '%s' "$RELEASE_NOTES"
+          echo ""
+          echo "RELEASE_NOTES_EOF"
+        } >> $GITHUB_OUTPUT
+
+    - name: Send Teams notification
+      shell: bash
+      env:
+        WEBHOOK_URL: ${{ inputs.webhook-url }}
+        VERSION: ${{ steps.release_info.outputs.VERSION }}
+        RELEASE_URL: ${{ steps.release_info.outputs.RELEASE_URL }}
+        RELEASE_NOTES: ${{ steps.release_info.outputs.RELEASE_NOTES }}
+        REPO_NAME: ${{ steps.release_info.outputs.REPO_NAME }}
+        THEME_COLOR: ${{ inputs.theme-color }}
+      run: |
+        ESCAPED_NOTES=$(printf '%s' "$RELEASE_NOTES" | sed 's/$/<br>/g' | jq -Rs .)
+
+        curl -H "Content-Type: application/json" -d @- "$WEBHOOK_URL" <<PAYLOAD
+        {
+          "@type": "MessageCard",
+          "@context": "http://schema.org/extensions",
+          "themeColor": "${THEME_COLOR}",
+          "summary": "A new ${REPO_NAME} version ${VERSION} has been released!",
+          "sections": [{
+            "activityTitle": "A new ${REPO_NAME} version ${VERSION} has been released!",
+            "facts": [{
+              "name": "Version",
+              "value": "${VERSION}"
+            }],
+            "text": ${ESCAPED_NOTES},
+            "markdown": true
+          }],
+          "potentialAction": [{
+            "@type": "OpenUri",
+            "name": "View Release",
+            "targets": [{
+              "os": "default",
+              "uri": "${RELEASE_URL}"
+            }]
+          }]
+        }
+        PAYLOAD
